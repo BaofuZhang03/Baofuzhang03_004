@@ -284,6 +284,7 @@ ENDTIME = "23:22:40"  # 根据学校的预约座位时间+40ms即可
 WARM_CONNECTION_LEAD_MS = 2500  # 连接预热提前量（毫秒）
 TEXTCLICK_FIRST_CAPTCHA_GUARD_MS = -1000  # 正数表示 T 前截止，负数表示允许延迟到 T 后
 FIRST_TOKEN_DATE_MODE = "today"  # 首次取 token 的日期：today 或 submit_date
+SKIP_FIRST_SEAT_QUERY = True  # 策略 A/C 首抢是否跳过 getusedtimes 查座
 RESERVE_NEXT_DAY = True  # 预约明天而不是今天的
 RESERVE_DAY_OFFSET = None  # 可选：覆盖提交参数 day 的北京时间日期偏移，2 表示后天
 ENABLE_SLIDER = False  # 是否有滑块验证（调试阶段先关闭）
@@ -427,6 +428,7 @@ def _apply_strategy_config(config):
     global WARM_CONNECTION_LEAD_MS
     global TEXTCLICK_FIRST_CAPTCHA_GUARD_MS
     global FIRST_TOKEN_DATE_MODE
+    global SKIP_FIRST_SEAT_QUERY
     global SEAT_API_MODE
     global RESERVE_DAY_OFFSET
 
@@ -513,6 +515,8 @@ def _apply_strategy_config(config):
     FIRST_TOKEN_DATE_MODE = (
         first_token_date_mode if first_token_date_mode in {"today", "submit_date"} else "submit_date"
     )
+    if "skip_first_seat_query" in strategy_cfg:
+        SKIP_FIRST_SEAT_QUERY = bool(strategy_cfg.get("skip_first_seat_query"))
     RELOGIN_EVERY_LOOP = bool(config.get("relogin_every_loop", RELOGIN_EVERY_LOOP))
 
 
@@ -1973,14 +1977,34 @@ def strategic_first_attempt(
                 if not token1:
                     logging.error("[strategic] [C] Token fetch failed, skip this config")
                     continue
-                logging.info(
-                    f"[strategic] [C] Got token from {_first_token_url}: {token1}; "
-                    "first submit skips seat getusedtimes and immediately uses primary seat"
-                )
-                submit_room = roomid
-                submit_seat = first_seat
-                submit_page_id = seat_page_id
-                submit_fid = fid_enc
+                if SKIP_FIRST_SEAT_QUERY:
+                    logging.info(
+                        f"[strategic] [C] Got token from {_first_token_url}: {token1}; "
+                        "first submit skips seat getusedtimes and immediately uses primary seat"
+                    )
+                    submit_room = roomid
+                    submit_seat = first_seat
+                    submit_page_id = seat_page_id
+                    submit_fid = fid_enc
+                else:
+                    logging.info(
+                        f"[strategic] [C] Got token from {_first_token_url}: {token1}; "
+                        "first submit checks seat getusedtimes before submit"
+                    )
+                    used_handle1 = s.post_getusedtimes_after_token(
+                        times,
+                        roomid,
+                        first_seat,
+                        submit_day,
+                        fid_enc=fid_enc,
+                    )
+                    submit_room, submit_seat, submit_page_id, submit_fid, token1, value1 = _maybe_switch_to_backup(
+                        used_handle1,
+                        token1,
+                        value1,
+                        "first submit",
+                        1,
+                    )
                 _remember_serial_target(submit_room, submit_seat, submit_page_id, submit_fid)
                 submit_captcha1 = _get_submit_captcha(1)
                 if submit_captcha1 is None:
@@ -2022,26 +2046,35 @@ def strategic_first_attempt(
                 if not token1:
                     logging.error("[strategic] [A] First token is empty, skip this config")
                     continue
-                used_handle1 = s.post_getusedtimes_after_token(
-                    times,
-                    roomid,
-                    first_seat,
-                    submit_day,
-                    fid_enc=fid_enc,
-                )
 
                 submit_dt1 = target_dt + datetime.timedelta(milliseconds=FIRST_SUBMIT_OFFSET_MS)
                 _wait_until(submit_dt1)
                 logging.info(
                     f"[strategic] [A] First submit at {_beijing_now()} (target_dt + {FIRST_SUBMIT_OFFSET_MS}ms)"
                 )
-                submit_room, submit_seat, submit_page_id, submit_fid, token1, value1 = _maybe_switch_to_backup(
-                    used_handle1,
-                    token1,
-                    value1,
-                    "first submit",
-                    1,
-                )
+                if SKIP_FIRST_SEAT_QUERY:
+                    logging.info(
+                        "[strategic] [A] First submit skips seat getusedtimes and immediately uses primary seat"
+                    )
+                    submit_room = roomid
+                    submit_seat = first_seat
+                    submit_page_id = seat_page_id
+                    submit_fid = fid_enc
+                else:
+                    used_handle1 = s.post_getusedtimes_after_token(
+                        times,
+                        roomid,
+                        first_seat,
+                        submit_day,
+                        fid_enc=fid_enc,
+                    )
+                    submit_room, submit_seat, submit_page_id, submit_fid, token1, value1 = _maybe_switch_to_backup(
+                        used_handle1,
+                        token1,
+                        value1,
+                        "first submit",
+                        1,
+                    )
                 _remember_serial_target(submit_room, submit_seat, submit_page_id, submit_fid)
                 submit_captcha1 = _get_submit_captcha(1)
                 if submit_captcha1 is None:
